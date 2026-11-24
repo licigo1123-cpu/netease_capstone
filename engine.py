@@ -50,10 +50,17 @@ def run(args,check=lambda:None,cwd=None):
 def plan(cfg,story,instruction):
     msgs=[{"role":"system","content":instruction+"。仅返回合法 JSON，不要 Markdown。"},{"role":"user","content":story}]
     if cfg["mode"]=="local":
-        data=req(cfg.get("url") or "http://127.0.0.1:11434/api/chat",{"model":cfg.get("model") or "qwen3.5:4b","messages":msgs,"format":"json","think":False,"stream":False,"keep_alive":0})
+        # Some Ollama MLX builds lack xgrammar and reject format=json with HTTP 501.
+        # Request JSON in the system prompt and enforce it in the parser below.
+        data=req(cfg.get("url") or "http://127.0.0.1:11434/api/chat",{"model":cfg.get("model") or "qwen3.5:4b","messages":msgs,"think":False,"stream":False,"keep_alive":0})
         out=data["message"]["content"]
     else:out=req(cfg["url"],{"model":cfg["model"],"messages":msgs,"response_format":{"type":"json_object"}},cfg.get("key"))["choices"][0]["message"]["content"]
-    return json.loads(re.sub(r'^\s*```(?:json)?|```\s*$','',out.strip()))
+    try:
+        result=json.loads(re.sub(r'^\s*```(?:json)?|```\s*$','',out.strip()))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"文本模型已连接，但没有返回合法 JSON（第 {exc.lineno} 行）；请重试。") from exc
+    if not isinstance(result,dict):raise ValueError("文本模型已连接，但返回的不是 JSON 对象。")
+    return result
 def generate(kind,cfg,prompt,refs,duration,voice,ticket,check,wide=False):
     w,h=(1536,1024) if wide else (576,1024)
     if cfg["mode"]=="api":

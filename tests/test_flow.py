@@ -14,6 +14,16 @@ class Workflow(unittest.TestCase):
         self.p=s.new("测试");self.id=self.p["id"];self.p["cards"],self.p["order"]=s.build(STORY);s.store(self.p)
     def api(self,act,**kw):
         with s.lock:return app.act({"act":act,"id":self.id,**kw})
+    def test_local_qwen_without_xgrammar(self):
+        def chat(url, body):
+            self.assertNotIn("format",body)
+            self.assertIn("JSON",body["messages"][0]["content"])
+            return {"message":{"content":'{"ready":true}'}}
+        with patch.object(e,"req",chat):
+            self.assertEqual(e.plan({"mode":"local"},"测试","输出 ready"),{"ready":True})
+        with patch.object(e,"req",return_value={"message":{"content":"好的"}}):
+            with self.assertRaisesRegex(ValueError,"合法 JSON"):e.plan({"mode":"local"},"测试","输出 ready")
+
     def test_reference_gate_and_edits(self):
         with self.assertRaisesRegex(ValueError,"先确认"):self.api("submit",k="S1F")
         c=self.p["cards"]
