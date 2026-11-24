@@ -9,6 +9,12 @@ def wait(job):
         if j["state"] not in ("生成中","排队中"):return j
         time.sleep(.02)
     raise AssertionError("timeout")
+SHEET="""| 镜号 | 地点 | 时段 | 环境 | 出镜角色 | 画面动作 | 对白 | 秒数 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 车站 | 傍晚 | 空月台 | 阿青 | 抬头看时钟 | 阿青：来了 | 1 |
+| 角色名 | 外貌 | 服装 |
+| 阿青 | 短发 | 白衬衣 |"""
+
 class Workflow(unittest.TestCase):
     def setUp(self):
         self.p=s.new("测试");self.id=self.p["id"];self.p["cards"],self.p["order"]=s.build(STORY);s.store(self.p)
@@ -24,17 +30,38 @@ class Workflow(unittest.TestCase):
         with patch.object(e,"req",return_value={"message":{"content":"好的"}}):
             with self.assertRaisesRegex(ValueError,"合法 JSON"):e.plan({"mode":"local"},"测试","输出 ready")
 
-    def test_format_repair_is_bounded_and_local(self):
-        err=e.ModelFormatError("JSON 不完整","{")
-        seen=[]
-        with patch.object(e,"plan",side_effect=[err,STORY]) as call:
-            self.assertEqual(s.plan_story({"mode":"local"},"测试",15,lambda:seen.append(1))[1],["S1"])
-            self.assertEqual(call.call_count,2)
+    def test_original_script_to_linked_cards_without_model_json(self):
+        script="女孩说：“只住一晚。”\n橘猫伸出爪子。"
+        sheet="镜号｜地点｜时段｜环境｜出镜角色｜画面动作｜对白｜秒数\n1｜楼下｜傍晚｜微光｜女孩、橘猫｜女孩蹲下，橘猫伸爪｜女孩：只住一晚。｜5秒"
+        def chat(url,body):
+            self.assertEqual(body["messages"][1],{"role":"user","content":script})
+            self.assertNotIn("format",body)
+            return {"message":{"content":sheet},"done_reason":"stop"}
+        with patch.object(e,"req",chat):
+            cards,order=s.plan_story({"mode":"local"},script,15,self.fail)
+        self.assertEqual(order,["S1"])
+        d=cards["S1"]["data"]
+        self.assertEqual([cards[k]["data"]["name"] for k in d["cast"]],["女孩","橘猫"])
+        self.assertEqual(cards[d["scene"]]["data"]["time"],"黄昏")
+        self.assertEqual(d["dialogue"],"女孩：只住一晚。")
+        self.assertNotIn("只住一晚",d["action"])
+    def test_sheet_errors_do_not_save_partial_plan(self):
+        seen=[];bad=SHEET.replace("阿青：来了","没有说话人")
+        with patch.object(e,"local_shot_text",side_effect=[bad,SHEET]) as call:
+            cards,order=s.plan_story({"mode":"local"},"原文",15,lambda:seen.append(1))
+            self.assertEqual(call.call_args.args[1],"原文")
+            self.assertEqual(cards["C1"]["data"]["outfit"],"白衬衣")
+            self.assertEqual(order,["S1"])
         self.assertEqual(seen,[1])
-        for mode,expected in (("api",1),("local",2)):
-            with patch.object(e,"plan",side_effect=err) as call:
-                with self.assertRaisesRegex(ValueError,"JSON 不完整"):s.plan_story({"mode":mode},"测试",15,lambda:None)
-                self.assertEqual(call.call_count,expected)
+        with patch.object(e,"local_shot_text",return_value=bad) as call:
+            with self.assertRaisesRegex(ValueError,"缺少说话人"):s.plan_story({"mode":"local"},"原文",15,lambda:None)
+            self.assertEqual(call.call_count,2)
+        with patch.object(e,"req",return_value={"done_reason":"length","message":{"content":SHEET}}):
+            with self.assertRaisesRegex(ValueError,"长度上限"):s.plan_story({"mode":"local"},"原文",15,self.fail)
+    def test_api_still_uses_json(self):
+        with patch.object(e,"plan",return_value=STORY) as call:
+            self.assertEqual(s.plan_story({"mode":"api"},"原文",15,self.fail)[1],["S1"])
+            self.assertEqual(call.call_args.args[1],"原文")
     def test_scene_time_matching(self):
         import copy
         data=copy.deepcopy(STORY)
@@ -72,9 +99,8 @@ class Workflow(unittest.TestCase):
         e.run([e.FF,"-y","-f","lavfi","-i","sine=frequency=410","-t",.8,wav]);calls=[]
         def generate(kind,cfg,prompt,refs,*rest):
             calls.append((kind,prompt,refs));return e.uri({"audio":wav,"video":vid,"image":png}[kind])
-        with patch.object(e,"generate",generate),patch.object(e,"plan",return_value=STORY):
-            self.api("save",data={"script":"阿青等车。"})
-            self.assertEqual(wait(self.api("submit",k="plan"))["state"],"完成")
+        with patch.object(e,"generate",generate),patch.object(e,"local_shot_text",return_value=SHEET):
+            self.assertEqual(wait(self.api("submit",k="plan",script="阿青等车。"))["state"],"完成")
             for k in ("S1","C1","L1","S1F","S1V","S1A"):
                 if k!="S1":
                     j=wait(self.api("submit",k=k));self.assertEqual(j["state"],"完成",j)

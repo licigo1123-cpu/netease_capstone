@@ -1,8 +1,9 @@
 """Project model and versioned review workflow. One local creator, one generation worker."""
-import copy, json, os, re, threading, time
+import hashlib, copy, json, os, re, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import engine as e
+import storyboard
 lock=threading.RLock()
 pool=ThreadPoolExecutor(1)
 P=e.DATA/"projects";P.mkdir(exist_ok=True)
@@ -56,25 +57,23 @@ def build(plan):
 SCHEMA='你是竖屏漫剧导演。拆成约一分钟的镜头，每镜1–15秒，估算台词时长，过长拆镜。只输出如下结构：{"characters":[{"name":"角色名","look":"外貌","outfit":"服装"}],"scenes":[{"location":"纯地点","time":"黄昏","environment":"空镜环境、光线，无角色动物或剧情"}],"shots":[{"location":"引用地点","time":"对应时间","characters":["引用角色名"],"action":"可见动作、景别、构图、运镜，不含任何台词或文字","seconds":5,"dialogue":[{"speaker":"角色名或旁白","text":"台词"}]}]}。time 字段只能是白天、黄昏、夜晚中的一个值。镜头的 location、time 必须逐字复制对应场景的值。相同地点和时间复用，每个角色唯一。'
 def plan_story(cfg,script,cap,repairing):
     instruction=SCHEMA+f"当前视频服务最长 {cap} 秒。优先 6–8 镜，字段简洁，不要重复原文。"
-    prompt=script
+    if cfg["mode"]!="local":
+        result=build(e.plan(cfg,script,instruction))
+        if any(result[0][s]["data"]["seconds"]>cap for s in result[1]):raise ValueError("拆镜结果超过视频时长限制")
+        return result
+    instruction=storyboard.INSTRUCTION+f" 每镜最多 {cap:g} 秒。"
     for attempt in range(2):
-        raw=None
+        # Do not repeat transport errors or silently accept a partial sheet.
+        reply=e.local_shot_text(cfg,script,instruction)
         try:
-            raw=e.plan(cfg,prompt,instruction)
-        except e.ModelFormatError as exc:
-            reason=str(exc);draft=exc.reply
-        else:
-            try:
-                result=build(raw)
-                if any(result[0][s]["data"]["seconds"]>cap for s in result[1]):raise ValueError("拆镜结果超过视频时长限制")
-                return result
-            except (ValueError,KeyError,TypeError,AttributeError) as exc:
-                reason=str(exc);draft=json.dumps(raw,ensure_ascii=False)
-        if attempt or cfg["mode"]!="local":
-            raise ValueError(("自动修复后仍无法拆镜：" if attempt else "拆镜格式错误：")+reason)
-        repairing()
-        prompt=json.dumps({"原文":script,"校验错误":reason,"待修复的输出":draft[:10000]},ensure_ascii=False)
-        instruction+="修复所给草稿，返回完整合法 JSON 对象，补全缺失字段和括号，不要解释。"
+            result=build(storyboard.parse(reply,cap,scene_key))
+            if any(result[0][s]["data"]["seconds"]>cap for s in result[1]):raise ValueError("对白过长，请拆成多个镜头")
+            return result
+        except ValueError as exc:
+            if attempt:raise ValueError(f"Qwen 分镜表校验失败：{exc}") from exc
+            repairing()
+            instruction+=f" 上次表格校验提示：{exc}。从原文重新输出完整表格，仅使用上述八列。"
+
 
 def dependencies(p,k):
     c=p["cards"][k];d=c["data"];s=d.get("shot","")
@@ -142,6 +141,7 @@ def submit(p,k,mode="",retry="",note=""):
     public={f:connection.get(f,"") for f in ("url","model","query","voice","maxSeconds","mode")}
     if not retry:j["connection"]=public
     elif j.get("remote") and j.get("connection",public)!=public:raise ValueError("原任务的接口或模型已改变，请恢复原配置再查询")
+    if k=="plan":j["source_hash"]=hashlib.sha256(p["script"].encode()).hexdigest()
     j.update(state="排队中",phase="等待执行",error="")
     if c:
         down(p,k);c.update(job=j["id"],state="生成中",note=j["note"])
@@ -161,6 +161,8 @@ def work(id):
         j=update(state="生成中",phase="调用生成服务");pid=j["pid"];k=j["target"];p=project(pid);cards=p["cards"];c=cards.get(k,{});d=c.get("data",{});s=d.get("shot");sh=cards[s]["data"] if s else {};kind=j["kind"];cfg=config(kind,j["mode"]);cfg.update(j.get("connection",{}));refs=[];note=j["note"];out="";detail=""
         if k=="plan":
             if not p["script"].strip():raise ValueError("请先输入剧本")
+            if j.get("source_hash") and j["source_hash"]!=hashlib.sha256(p["script"].encode()).hexdigest():
+                raise ValueError("原文在排队期间已修改，请按当前剧本重新拆镜")
             cap=float(config("video",p["defaults"]["video"]).get("maxSeconds") or 15)
             result=plan_story(cfg,p["script"],cap,lambda:update(phase="正在修复分镜格式"))
         elif k in ("film","preview"):

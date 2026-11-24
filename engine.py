@@ -52,6 +52,19 @@ class ModelFormatError(ValueError):
         super().__init__(message)
         self.reply=reply
 
+def local_shot_text(cfg,script,instruction):
+    # The first user message is exactly the saved original, not JSON containing a draft.
+    data=req(cfg.get("url") or "http://127.0.0.1:11434/api/chat",{
+        "model":cfg.get("model") or "qwen3.5:4b",
+        "messages":[{"role":"system","content":instruction},{"role":"user","content":script}],
+        "stream":False,"think":False,"keep_alive":0,
+        "options":{"temperature":0.1,"num_ctx":8192,"num_predict":2500}})
+    if data.get("done_reason")=="length":
+        raise ValueError("Qwen 达到输出长度上限，未接收不完整的分镜表")
+    text=data.get("message",{}).get("content")
+    if not isinstance(text,str) or not text.strip():raise ValueError("Qwen 未返回分镜正文")
+    return text
+
 def plan(cfg,story,instruction):
     msgs=[{"role":"system","content":instruction+"。仅返回合法 JSON，不要 Markdown。"},{"role":"user","content":story}]
     if cfg["mode"]=="local":

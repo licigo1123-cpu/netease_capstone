@@ -20,6 +20,8 @@ zsh start.command
 6. 所有分镜与视频确认后，点击 **合成最终 MP4**。未确认的已生成配音也会阻止导出。
 
 ## 连接协议
+**本地拆镜：** 点击时提交输入框原文，Qwen 阅读故事并返回逐镜表。Python 提取出镜角色、场景与时段、画面动作、对白和时长，验证后一次写入待审核卡片；无需模型输出嵌套 JSON。
+
 **本地文本：** Ollama 的 /api/chat，默认 qwen3.5:4b，可修改模型与完整地址。先用 Ollama 安装并启动所选模型。Mac 若已有相邻 ollama-runtime/models，启动脚本会尝试复用。API 文本使用 OpenAI 风格 Chat Completions，要求支持 JSON 对象输出。
 
 **本地 H3 是命令行推理，不是云端 API。** 默认复用仓库旁的 h3-runtime（视频）和 h3-image-runtime（图片），分别由 H3_RUNTIME / H3_IMAGE_RUNTIME 覆盖。视频对接 [minimax-h3-mac](https://github.com/Argus-AiTeam/minimax-h3-mac) 的 scripts/generate.py；适配的上游提交为 3fcc9f8c557cf353400b1acf737b985e524a509f。需先按上游说明准备 .venv、MiniMax-H3 FL2VA 与 Turbo LoRA，再执行 zsh scripts/apply_h3_i2v_patch.zsh 检查/应用首帧补丁。图片使用 h3-image-mlx，安装脚本 scripts/setup_h3_image.zsh 以现有视频环境的 Python 创建独立环境，并在确认许可后下载权重。三视图 1536×1024；场景和关键帧 576×1024；本地低内存视频 288×512。运行时、权重、Metal 和可用内存决定本机能否推理。仅需远程 API 时无需安装 H3。

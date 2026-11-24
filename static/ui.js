@@ -62,7 +62,7 @@ document.addEventListener('click',async ev=>{const b=ev.target.closest('[data-a]
  if(a==='pack'){location.href='/package?id='+P.id;return}if(a==='import')return $('#zip').click();
  if(a==='tab'){tab=+k;return await refresh()}if(a==='cfgsave'){await saveCfg();$('dialog').close();msg('连接已保存');return await refresh()}
  if(a==='probe'||a==='sample'){await saveCfg();let [kind,mode]=k.split(':');if(a==='probe')return msg((await api('probe',{kind,mode})).message);await api('submit',{k:'sample:'+kind,mode});$('dialog').close();tab=6}
- if(a==='gen'){if(k==='plan'&&!P.script.trim())throw Error('请先输入剧本原文');if(k==='plan'&&(!P.script.trim()||P.order.length&&!confirm('重新拆镜将归档当前分镜和素材，继续？')))return;await api('submit',{k,mode:document.getElementById('m'+k)?.value,note});msg('已加入任务队列')}
+ if(a==='gen'){const script=k==='plan'?$('#script').value:undefined;if(k==='plan'&&!script.trim())throw Error('请先输入剧本原文');if(k==='plan'&&P.order.length&&!confirm('重新拆镜将归档当前分镜和素材，继续？'))return;await api('submit',{k,mode:document.getElementById('m'+k)?.value,note,script});msg('已加入任务队列')}
  if(a==='fieldreview'){const [n,f]=k.split(':');await api('fieldreview',{k:n,field:f,note:document.getElementById('n'+n)?.value||''})}
  if(a==='reject'||a==='approve')await api('review',{k,state:a==='approve'?'已确认':'需修改',note});
  if(a==='refine'){if(!note.trim())throw Error('请先填写修改建议');await api('refine',{k,note,field:$('#f'+k).value})}

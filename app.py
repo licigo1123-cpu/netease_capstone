@@ -73,7 +73,11 @@ def act(b):
         c.update(state=state,note=b.get("note",""))
         p["history"].append({"k":k,"version":c["version"],"state":state,"note":c["note"],"at":e.time.time()})
         if c["kind"]=="shot" and state=="需修改":c["state"]="需修改"
-    elif a=="submit":return st.submit(p,k,b.get("mode"),b.get("retry"),b.get("note",""))
+    elif a=="submit":
+        if k=="plan" and "script" in b:
+            if not isinstance(b["script"],str) or not b["script"].strip():raise ValueError("请先输入剧本原文")
+            p["script"]=b["script"]
+        return st.submit(p,k,b.get("mode"),b.get("retry"),b.get("note",""))
     elif a=="cancel":
         j=st.read(st.path(st.J,b["job"]))
         if j["pid"]!=p["id"] or j["state"] not in ("生成中","排队中"):raise ValueError("任务不在运行中")
