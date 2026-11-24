@@ -1,0 +1,246 @@
+diff --git a/minimax_h3_mlx/pipeline.py b/minimax_h3_mlx/pipeline.py
+index b7a7ffa..f7441fe 100644
+--- a/minimax_h3_mlx/pipeline.py
++++ b/minimax_h3_mlx/pipeline.py
+@@ -471,8 +471,6 @@ class MiniMaxH3Pipeline:
+         """
+         run_started = time.perf_counter()
+ 
+-        if self._low_memory and images:
+-            raise NotImplementedError("low-memory mode currently supports text-to-video only")
+         if self._low_memory:
+             from .text_encoder import MiniMaxH3TextEncoder
+ 
+@@ -481,7 +479,7 @@ class MiniMaxH3Pipeline:
+                 "load_overhead",
+                 lambda: MiniMaxH3TextEncoder(
+                     self._text_encoder_path,
+-                    load_vision=False,
++                    load_vision=bool(images),
+                     verbose=verbose,
+                     tokenizer_dir=self._checkpoint_root / "tokenizer",
+                     processor_dir=self._checkpoint_root / "processor",
+@@ -502,31 +500,6 @@ class MiniMaxH3Pipeline:
+             text_token_tags = np.array(text_token_tags, copy=True)
+             self._release_component("text_encoder")
+ 
+-            from .streaming import load_streaming_dit
+-
+-            self.dit, self._block_provider = profiled_call(
+-                "load.streaming_transformer_low_memory",
+-                "load_overhead",
+-                lambda: load_streaming_dit(
+-                    self._dit_path,
+-                    turbo_lora_path=self._turbo_lora_path,
+-                    turbo_lora_alpha=self._turbo_lora_alpha,
+-                    turbo_lora_scale=self._turbo_lora_scale,
+-                    block_load_mode=self._block_load_mode,
+-                    stream_block_group_size=self._stream_block_group_size,
+-                    verbose=verbose,
+-                ),
+-                eval_output=False,
+-            )
+-            self.set_dense_dequant_profile(
+-                self._dense_dequant_profile,
+-                attention_qkv_tile_size=self._dense_dequant_attention_qkv_tile_size,
+-                ffn_fc2_tile_size=self._dense_dequant_ffn_fc2_tile_size,
+-                attention_out_tile_size=self._dense_dequant_attention_out_tile_size,
+-            )
+-            if self._memory_pressure_guard:
+-                self._memory_guard_boundary()
+-
+         # 2. Geometry.
+         if height is None or width is None:
+             height, width = resolve_canvas_size(*aspect)
+@@ -557,12 +530,46 @@ class MiniMaxH3Pipeline:
+         # 3. Keyframe conditioning rows, encoded before any request noise is drawn.
+         condition_rows = None
+         if images:
++            if self._low_memory:
++                from .load import load_video_vae
++                self.video_vae = load_video_vae(self._checkpoint_root / "video_vae")
+             condition_rows = profiled_call(
+                 "pipeline.encode_keyframes",
+                 "conditioning_encode",
+                 lambda: self._encode_keyframes(images, height, width),
+             )
+ 
++            if self._low_memory:
++                mx.eval(condition_rows)
++                condition_rows = mx.array(np.array(condition_rows), dtype=mx.float32)
++                self._release_component("video_vae")
++
++        if self._low_memory:
++            from .streaming import load_streaming_dit
++
++            self.dit, self._block_provider = profiled_call(
++                "load.streaming_transformer_low_memory",
++                "load_overhead",
++                lambda: load_streaming_dit(
++                    self._dit_path,
++                    turbo_lora_path=self._turbo_lora_path,
++                    turbo_lora_alpha=self._turbo_lora_alpha,
++                    turbo_lora_scale=self._turbo_lora_scale,
++                    block_load_mode=self._block_load_mode,
++                    stream_block_group_size=self._stream_block_group_size,
++                    verbose=verbose,
++                ),
++                eval_output=False,
++            )
++            self.set_dense_dequant_profile(
++                self._dense_dequant_profile,
++                attention_qkv_tile_size=self._dense_dequant_attention_qkv_tile_size,
++                ffn_fc2_tile_size=self._dense_dequant_ffn_fc2_tile_size,
++                attention_out_tile_size=self._dense_dequant_attention_out_tile_size,
++            )
++            if self._memory_pressure_guard:
++                self._memory_guard_boundary()
++
+         # 4. Initial noise. Draw order matches the reference — the conditioning noise comes off the
+         #    request generator first, then video, then audio — so a seed reproduces the same run.
+         mx.random.seed(seed)
+diff --git a/minimax_h3_mlx/text_encoder.py b/minimax_h3_mlx/text_encoder.py
+index f7d7a1f..90d1afa 100644
+--- a/minimax_h3_mlx/text_encoder.py
++++ b/minimax_h3_mlx/text_encoder.py
+@@ -64,9 +64,6 @@ class MiniMaxH3TextEncoder:
+                 "layers is post-norm and is not the conditioning MiniMax-H3 expects."
+             )
+ 
+-        if stream_layers and load_vision:
+-            raise ValueError("streamed text-encoder loading currently supports text-only requests")
+-
+         self.num_layers = num_layers
+         self.full_layers = full_layers
+         self.dtype = dtype
+@@ -126,6 +123,20 @@ class MiniMaxH3TextEncoder:
+             from .selective_loading import load_weight_map
+ 
+             self._weight_map = load_weight_map(model_dir)
++            if self.vision is not None:
++                from .selective_loading import load_selected_mlx_tensors
++                from mlx.utils import tree_flatten, tree_unflatten
++                prefix = "model.visual."
++                keys = [key for key in self._weight_map if key.startswith(prefix)]
++                raw_vision = load_selected_mlx_tensors(model_dir, keys)
++                weights = self.vision.sanitize({key[len(prefix):]: value.astype(dtype)
++                                               for key, value in raw_vision.items()})
++                expected = {key for key, _ in tree_flatten(self.vision.parameters())}
++                if expected - weights.keys():
++                    raise KeyError("vision checkpoint is incomplete")
++                self.vision.update(tree_unflatten(list(weights.items())))
++                mx.eval(self.vision.parameters())
++                del raw_vision, weights
+             self.skipped_tensors = len(self._weight_map) - sum(
+                 key == "model.language_model.embed_tokens.weight"
+                 or any(key.startswith(f"model.language_model.layers.{i}.") for i in range(num_layers))
+@@ -350,6 +361,37 @@ class MiniMaxH3TextEncoder:
+         layer.update(tree_unflatten(updates))
+         mx.eval(*(tensor for _, tensor in updates))
+ 
++    def _stream_embeddings(self, input_ids):
++        embedding_key = "model.language_model.embed_tokens.weight"
++        embedding = self._load_stream_tensor(embedding_key)
++        if self.quantized:
++            from .selective_loading import load_selected_mlx_tensors
++
++            stem = embedding_key[: -len("weight")]
++            aux_keys = [stem + "scales", stem + "biases"]
++            aux = load_selected_mlx_tensors(self._model_dir, aux_keys)
++            # QuantizedEmbedding cannot be used as the streamed layer slot. Select the prompt
++            # rows while they are still packed, then dequantize only those rows; dequantizing
++            # the complete 151936 x 5120 table would defeat low-memory text streaming.
++            h = mx.dequantize(
++                embedding[input_ids],
++                aux[stem + "scales"][input_ids],
++                aux[stem + "biases"][input_ids],
++                group_size=int(self.quant_config["group_size"]),
++                bits=int(self.quant_config["bits"]),
++                mode=str(self.quant_config.get("mode", "affine")),
++            )
++            del aux
++        else:
++            h = embedding[input_ids]
++        mx.eval(h)
++        del embedding
++        gc.collect()
++        clear_cache = getattr(mx, "clear_cache", None)
++        if clear_cache is not None:
++            clear_cache()
++        return h
++
+     def _hidden_states(
+         self,
+         input_ids: mx.array,
+@@ -362,36 +404,7 @@ class MiniMaxH3TextEncoder:
+         from mlx_vlm.models.base import create_attention_mask
+ 
+         if self.stream_layers:
+-            if inputs_embeds is not None or deepstack_visual_embeds is not None:
+-                raise ValueError("streamed text encoder does not support vision embeddings")
+-            embedding_key = "model.language_model.embed_tokens.weight"
+-            embedding = self._load_stream_tensor(embedding_key)
+-            if self.quantized:
+-                from .selective_loading import load_selected_mlx_tensors
+-
+-                stem = embedding_key[: -len("weight")]
+-                aux_keys = [stem + "scales", stem + "biases"]
+-                aux = load_selected_mlx_tensors(self._model_dir, aux_keys)
+-                # QuantizedEmbedding cannot be used as the streamed layer slot. Select the prompt
+-                # rows while they are still packed, then dequantize only those rows; dequantizing
+-                # the complete 151936 x 5120 table would defeat low-memory text streaming.
+-                h = mx.dequantize(
+-                    embedding[input_ids],
+-                    aux[stem + "scales"][input_ids],
+-                    aux[stem + "biases"][input_ids],
+-                    group_size=int(self.quant_config["group_size"]),
+-                    bits=int(self.quant_config["bits"]),
+-                    mode=str(self.quant_config.get("mode", "affine")),
+-                )
+-                del aux
+-            else:
+-                h = embedding[input_ids]
+-            mx.eval(h)
+-            del embedding
+-            gc.collect()
+-            clear_cache = getattr(mx, "clear_cache", None)
+-            if clear_cache is not None:
+-                clear_cache()
++            h = self._stream_embeddings(input_ids) if inputs_embeds is None else inputs_embeds
+             mask = create_attention_mask(h, None)
+             layer = self._stream_layer
+             position_embeddings = None
+@@ -400,6 +413,10 @@ class MiniMaxH3TextEncoder:
+             for layer_idx in range(self.num_layers):
+                 self._load_stream_layer(layer_idx)
+                 h = layer(h, mask, None, position_ids, position_embeddings)
++                if deepstack_visual_embeds is not None and layer_idx < len(deepstack_visual_embeds):
++                    from mlx_vlm.models.qwen3_vl.language import Qwen3VLModel
++                    h = Qwen3VLModel._deepstack_process(self, h, visual_pos_masks,
++                                                       deepstack_visual_embeds[layer_idx])
+                 # Materialize before replacing this slot with the next layer's weights, ensuring
+                 # that at most one full decoder layer is resident.
+                 mx.eval(h)
+@@ -440,9 +457,20 @@ class MiniMaxH3TextEncoder:
+             hidden, deepstack_embeds = self.vision(
+                 mx.array(pixel_values).astype(self.dtype), grid_thw, output_hidden_states=True
+             )
+-            inputs_embeds = self.language.embed_tokens(input_ids)
++            inputs_embeds = (self._stream_embeddings(input_ids) if self.stream_layers
++                             else self.language.embed_tokens(input_ids))
+             image_mask = input_ids == self.image_token_id
+-            inputs_embeds = mx.where(image_mask[..., None], hidden.astype(inputs_embeds.dtype)[None], inputs_embeds)
++            indices = mx.array(np.where(np.asarray(image_mask)[0])[0], dtype=mx.uint32)
++            if len(indices) != hidden.shape[0]:
++                raise ValueError("vision embeddings do not match image tokens")
++            inputs_embeds = inputs_embeds.at[0, indices].add(
++                hidden.astype(inputs_embeds.dtype) - inputs_embeds[0, indices])
++            if self.stream_layers:
++                mx.eval(inputs_embeds, deepstack_embeds)
++                self.vision = None
++                hidden = None
++                gc.collect()
++                mx.clear_cache()
+             visual_pos_masks = image_mask
+ 
+         # Qwen3-VL's 3D M-RoPE index, derived from the vision-start/pad token ids.
