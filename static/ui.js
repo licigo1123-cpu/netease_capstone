@@ -24,11 +24,17 @@ function card(k){const c=P.cards[k],d=c.data,kind=c.kind,shot=P.cards[d.shot]?.d
  let refine=['char','scene','shot'].includes(kind)?'<div class="row"><select id="f'+k+'">'+Object.keys(d).filter(f=>['look','outfit','environment','location','action','dialogue','cast','scene'].includes(f)).map(f=>option(f,names[f])).join('')+'</select>'+btn('refine','按意见细化字段',k)+'</div>':'';
  return '<article><div class="meta"><label>'+E(k)+' · '+E(({frame:'关键帧',video:'镜头视频',audio:'配音',shot:'分镜',char:d.name,scene:d.location})[kind])+'</label><b class="badge">'+E(c.state)+' · v'+E(c.version)+'</b></div>'+content+media(c.uri)+'<details><summary>修改建议与版本记录</summary><textarea id="n'+k+'" placeholder="例如：保持外套颜色，把镜头改为近景">'+E(c.note)+'</textarea>'+refine+'<p class="note">'+c.history.length+' 条历史记录</p>'+c.history.slice(-4).reverse().map(h=>url(h.uri)?'<a href="'+url(h.uri)+'" target="_blank">查看 v'+h.version+' 素材</a> ':'').join('')+'</details><div class="row">'+(isShot?'':mode(k,kind==='video'?'video':kind==='audio'?'audio':'image')+btn('gen','生成 / 重做',k,'primary'))+btn('approve','确认',k)+btn('reject','需修改',k)+'</div></article>'}
 function intro(title,text){return '<div class="intro"><h2>'+title+'</h2><p>'+text+'</p></div>'}
+function splitControls(){
+ const active=J.find(j=>j.target==='plan'&&['排队中','生成中'].includes(j.state));
+ const job=active||J.find(j=>j.target==='plan');
+ const text=!job?'':job.state==='失败'?'拆镜失败：'+(job.error||'未返回错误详情'):job.state==='排队中'?'拆镜已排队，等待前面的任务结束。':job.phase==='正在修复分镜格式'&&job.state==='生成中'?'模型首次输出未通过校验，正在自动修复一次。':job.state==='生成中'?'文本模型正在拆分剧本，完成后会自动显示分镜卡，无需重复点击。':job.state==='完成'?'拆镜完成：'+P.order.length+' 个镜头。':'拆镜已取消。';
+ return '<div class="row">'+mode('plan','text')+(active?'<button disabled>'+E(active.state)+'…</button>':btn('gen','拆分剧本','plan','primary'))+'</div><div role="status">'+E(text)+'</div>';
+}
 function render(){
  $('#tabs').innerHTML=tabs.map((t,i)=>btn('tab','0'+(i+1)+'　'+t,i,tab===i?'active':'')).join('');
  $('#title').textContent=P.name;$('#sync').textContent='9:16　·　'+P.order.length+' 镜　·　'+(J.some(j=>['排队中','生成中'].includes(j.state))?'任务执行中':'已保存');
  let h='',kind=['shot','char','scene','frame','video'][tab];
- if(tab===0)h=intro('从一段故事开始','粘贴剧本，拆出镜头、角色、场景与独立对白。先复核分镜，再制作素材。')+'<article><label>剧本原文</label><textarea id="script" style="min-height:145px" placeholder="在这里输入故事或小说片段…">'+E(P.script)+'</textarea><div class="row">'+mode('plan','text')+btn('gen','拆分剧本','plan','primary')+'</div></article>';
+ if(tab===0)h=intro('从一段故事开始','粘贴剧本，拆出镜头、角色、场景与独立对白。先复核分镜，再制作素材。')+'<article><label>剧本原文</label><textarea id="script" style="min-height:145px" placeholder="在这里输入故事或小说片段…">'+E(P.script)+'</textarea>'+splitControls()+'</article>';
  if(tab>0&&tab<5)h=intro(tabs[tab],['','每个角色共用一张正、侧、背三视图；审核后可供多个镜头引用。','同一地点和时间复用一张空镜图。先核对结构化环境字段，再生成。','按镜头绑定已确认的角色三视图与场景图。','复用已确认关键帧补拍单镜。'][tab]);
  if(kind){const keys=Object.keys(P.cards).filter(k=>P.cards[k].kind===kind);h+='<div class="grid">'+keys.map(card).join('')+'</div>';if(!keys.length)h+='<p class="note">暂无卡片。完成剧本拆分后将在这里出现。</p>'}
  if(tab===5){

@@ -47,6 +47,11 @@ def run(args,check=lambda:None,cwd=None):
             if proc.poll() is None:proc.kill();proc.wait()
         if proc.returncode:
             log.seek(0);raise ValueError(log.read().decode(errors="replace")[-1500:] or "外部程序失败")
+class ModelFormatError(ValueError):
+    def __init__(self,message,reply):
+        super().__init__(message)
+        self.reply=reply
+
 def plan(cfg,story,instruction):
     msgs=[{"role":"system","content":instruction+"。仅返回合法 JSON，不要 Markdown。"},{"role":"user","content":story}]
     if cfg["mode"]=="local":
@@ -58,8 +63,8 @@ def plan(cfg,story,instruction):
     try:
         result=json.loads(re.sub(r'^\s*```(?:json)?|```\s*$','',out.strip()))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"文本模型已连接，但没有返回合法 JSON（第 {exc.lineno} 行）；请重试。") from exc
-    if not isinstance(result,dict):raise ValueError("文本模型已连接，但返回的不是 JSON 对象。")
+        raise ModelFormatError(f"文本模型已连接，但没有返回合法 JSON（第 {exc.lineno} 行）。",out) from exc
+    if not isinstance(result,dict):raise ModelFormatError("文本模型已连接，但返回的不是 JSON 对象。",out)
     return result
 def generate(kind,cfg,prompt,refs,duration,voice,ticket,check,wide=False):
     w,h=(1536,1024) if wide else (576,1024)

@@ -19,6 +19,18 @@ def new(name):
     p={"schema":1,"aspect":"9:16","id":e.uid(),"name":name or "未命名剧集","script":"","cards":{},"order":[],"defaults":{k:"local" for k in ("text","image","video","audio")},"mix":{"subs":True,"speech":1,"effects":.45,"music":.18},"film":"","history":[]}
     store(p);return p
 def card(kind,data):return {"kind":kind,"data":data,"state":"待生成","uri":"","version":0,"note":"","job":"","history":[]}
+TIME_GROUPS = {
+    "白天": {"白天","日间","白昼","清晨","早晨","早上","上午","中午","午后","下午","day","daytime","morning","afternoon"},
+    "黄昏": {"黄昏","傍晚","日落","薄暮","夕阳时分","dusk","sunset","twilight"},
+    "夜晚": {"夜晚","晚上","夜间","夜里","深夜","半夜","午夜","夜","night","midnight"},
+}
+def scene_key(row,label):
+    loc=row.get("location")
+    if not isinstance(loc,str) or not loc.strip():raise ValueError(f"{label}缺少地点 location")
+    raw=str(row.get("time","")).strip().lower()
+    for time,aliases in TIME_GROUPS.items():
+        if raw in aliases:return loc.strip(),time
+    raise ValueError(f"{label}「{loc}」的时间 {raw[:40]!r} 无法归类；需要白天、黄昏或夜晚")
 def build(plan):
     cards={};order=[];chars={};scenes={}
     for x in plan["characters"]:
@@ -26,11 +38,12 @@ def build(plan):
         if n and n not in chars:
             k="C"+str(len(chars)+1);chars[n]=k;cards[k]=card("char",{"name":n,"look":x["look"],"outfit":x["outfit"],"voice":""})
     for x in plan["scenes"]:
-        loc=str(x["location"]).strip();t=x["time"]
-        if not loc or t not in ("白天","夜晚","黄昏"):raise ValueError("场景地点或时间无效")
+        loc,t=scene_key(x,"场景")
         k=scenes.get((loc,t)) or "L"+str(len(scenes)+1);scenes[loc,t]=k;cards[k]=card("scene",{"location":loc,"time":t,"environment":x["environment"]})
     for i,x in enumerate(plan["shots"],1):
-        k="S"+str(i);loc=scenes[x["location"],x["time"]];cast=[chars[n] for n in x["characters"]];lines=x["dialogue"]
+        k="S"+str(i);key=scene_key(x,f"镜头 {i}")
+        if key not in scenes:raise ValueError(f"镜头 {i} 引用了未定义的场景：{key[0]}（{key[1]}）")
+        loc=scenes[key];cast=[chars[n] for n in x["characters"]];lines=x["dialogue"]
         if not isinstance(lines,list):raise ValueError("对白必须按行存储")
         dialogue="\n".join(str(l["speaker"])+"："+str(l["text"]) for l in lines)
         seconds=min(15,max(1,float(x.get("seconds",5)),min(15,sum(len(str(l["text"])) for l in lines)/4)))
@@ -40,7 +53,29 @@ def build(plan):
         cards[k+"V"]["data"].update(start=0,end=round(seconds,1),sfx="")
     if not order:raise ValueError("模型未返回镜头")
     return cards,order
-SCHEMA='你是竖屏漫剧导演。拆成约一分钟的镜头，每镜1–15秒，估算台词时长，过长拆镜。只输出如下结构：{"characters":[{"name":"角色名","look":"外貌","outfit":"服装"}],"scenes":[{"location":"纯地点","time":"白天/夜晚/黄昏三选一","environment":"空镜环境、光线，无角色动物或剧情"}],"shots":[{"location":"引用地点","time":"对应时间","characters":["引用角色名"],"action":"可见动作、景别、构图、运镜，不含任何台词或文字","seconds":5,"dialogue":[{"speaker":"角色名或旁白","text":"台词"}]}]}。相同地点和时间复用，每个角色唯一。'
+SCHEMA='你是竖屏漫剧导演。拆成约一分钟的镜头，每镜1–15秒，估算台词时长，过长拆镜。只输出如下结构：{"characters":[{"name":"角色名","look":"外貌","outfit":"服装"}],"scenes":[{"location":"纯地点","time":"黄昏","environment":"空镜环境、光线，无角色动物或剧情"}],"shots":[{"location":"引用地点","time":"对应时间","characters":["引用角色名"],"action":"可见动作、景别、构图、运镜，不含任何台词或文字","seconds":5,"dialogue":[{"speaker":"角色名或旁白","text":"台词"}]}]}。time 字段只能是白天、黄昏、夜晚中的一个值。镜头的 location、time 必须逐字复制对应场景的值。相同地点和时间复用，每个角色唯一。'
+def plan_story(cfg,script,cap,repairing):
+    instruction=SCHEMA+f"当前视频服务最长 {cap} 秒。优先 6–8 镜，字段简洁，不要重复原文。"
+    prompt=script
+    for attempt in range(2):
+        raw=None
+        try:
+            raw=e.plan(cfg,prompt,instruction)
+        except e.ModelFormatError as exc:
+            reason=str(exc);draft=exc.reply
+        else:
+            try:
+                result=build(raw)
+                if any(result[0][s]["data"]["seconds"]>cap for s in result[1]):raise ValueError("拆镜结果超过视频时长限制")
+                return result
+            except (ValueError,KeyError,TypeError,AttributeError) as exc:
+                reason=str(exc);draft=json.dumps(raw,ensure_ascii=False)
+        if attempt or cfg["mode"]!="local":
+            raise ValueError(("自动修复后仍无法拆镜：" if attempt else "拆镜格式错误：")+reason)
+        repairing()
+        prompt=json.dumps({"原文":script,"校验错误":reason,"待修复的输出":draft[:10000]},ensure_ascii=False)
+        instruction+="修复所给草稿，返回完整合法 JSON 对象，补全缺失字段和括号，不要解释。"
+
 def dependencies(p,k):
     c=p["cards"][k];d=c["data"];s=d.get("shot","")
     if c["kind"]=="frame":
@@ -127,8 +162,7 @@ def work(id):
         if k=="plan":
             if not p["script"].strip():raise ValueError("请先输入剧本")
             cap=float(config("video",p["defaults"]["video"]).get("maxSeconds") or 15)
-            result=build(e.plan(cfg,p["script"],SCHEMA+f"当前视频服务最长 {cap} 秒，超过时拆成多个镜头。"))
-            if any(result[0][s]["data"]["seconds"]>cap for s in result[1]):raise ValueError("拆镜结果超过视频时长限制，请缩短对白或调整视频服务")
+            result=plan_story(cfg,p["script"],cap,lambda:update(phase="正在修复分镜格式"))
         elif k in ("film","preview"):
             clips=[]
             for s in p["order"]:

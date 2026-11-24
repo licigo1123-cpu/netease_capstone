@@ -24,6 +24,27 @@ class Workflow(unittest.TestCase):
         with patch.object(e,"req",return_value={"message":{"content":"好的"}}):
             with self.assertRaisesRegex(ValueError,"合法 JSON"):e.plan({"mode":"local"},"测试","输出 ready")
 
+    def test_format_repair_is_bounded_and_local(self):
+        err=e.ModelFormatError("JSON 不完整","{")
+        seen=[]
+        with patch.object(e,"plan",side_effect=[err,STORY]) as call:
+            self.assertEqual(s.plan_story({"mode":"local"},"测试",15,lambda:seen.append(1))[1],["S1"])
+            self.assertEqual(call.call_count,2)
+        self.assertEqual(seen,[1])
+        for mode,expected in (("api",1),("local",2)):
+            with patch.object(e,"plan",side_effect=err) as call:
+                with self.assertRaisesRegex(ValueError,"JSON 不完整"):s.plan_story({"mode":mode},"测试",15,lambda:None)
+                self.assertEqual(call.call_count,expected)
+    def test_scene_time_matching(self):
+        import copy
+        data=copy.deepcopy(STORY)
+        data["scenes"][0]["time"]=" 傍晚 "
+        data["shots"][0]["location"]=" 车站"
+        cards,order=s.build(data)
+        self.assertEqual(cards[cards["S1"]["data"]["scene"]]["data"]["time"],"黄昏")
+        data["shots"][0]["time"]="不详"
+        with self.assertRaisesRegex(ValueError,"镜头 1.*不详"):s.build(data)
+
     def test_reference_gate_and_edits(self):
         with self.assertRaisesRegex(ValueError,"先确认"):self.api("submit",k="S1F")
         c=self.p["cards"]
