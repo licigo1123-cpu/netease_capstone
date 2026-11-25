@@ -1,0 +1,46 @@
+--- a/minimax_h3_mlx/text_encoder.py
++++ b/minimax_h3_mlx/text_encoder.py
+@@ -155,7 +155,7 @@
+         self.merge_size = self.vision_config.spatial_merge_size
+ 
+         self._tokenizer = None
+-        self._processor = None
++        self._image_processor = None
+         self._model_dir = model_dir
+         root = model_dir.parent
+         self._tokenizer_dir = (
+@@ -260,12 +260,15 @@
+         return self._tokenizer
+ 
+     @property
+-    def processor(self):
+-        if self._processor is None:
+-            from transformers import AutoProcessor
+-
+-            self._processor = AutoProcessor.from_pretrained(str(self._processor_dir))
+-        return self._processor
++    def image_processor(self):
++        if self._image_processor is None:
++            from transformers import AutoImageProcessor
++
++            # H3 consumes PIL reference frames as NumPy arrays before MLX inference.
++            self._image_processor = AutoImageProcessor.from_pretrained(
++                str(self._processor_dir), backend="pil", local_files_only=True
++            )
++        return self._image_processor
+ 
+     # -- request presentation --------------------------------------------------------------
+ 
+@@ -283,10 +286,10 @@
+         vision_inputs = None
+ 
+         if images:
+-            vision = self.processor.image_processor(images=images, return_tensors="np")
++            vision = self.image_processor(images=images, return_tensors="np")
+             pixel_values = np.asarray(vision["pixel_values"])
+             grid_thw = np.asarray(vision["image_grid_thw"])
+-            merge = self.processor.image_processor.merge_size**2
++            merge = self.image_processor.merge_size**2
+             start = self.tokenizer.convert_tokens_to_ids("<|vision_start|>")
+             pad = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+             end = self.tokenizer.convert_tokens_to_ids("<|vision_end|>")
